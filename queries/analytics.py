@@ -29,8 +29,11 @@ from data.generate_and_load import haversine
 GEOHASH_PRECISION = 5  # doit correspondre à la précision écrite dans vehicles_by_geohash
 
 
+_NOW = None  # date de référence imposée par --now (sinon l'heure réelle)
+
+
 def utcnow():
-    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    return _NOW or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
 def as_date(d):
@@ -152,7 +155,11 @@ def main():
     ap.add_argument("--repeat", type=int, default=10, help="exécutions par requête")
     ap.add_argument("--lat", type=float, help="latitude du centre de A20")
     ap.add_argument("--lon", type=float, help="longitude du centre de A20")
+    ap.add_argument("--now", help="date de référence ISO utilisée au chargement (ex. 2026-10-31T12:00:00)")
     args = ap.parse_args()
+    global _NOW
+    if args.now:
+        _NOW = dt.datetime.fromisoformat(args.now)
 
     cluster, s = connect(args.cl)
     a = Analytics(s)
@@ -207,7 +214,7 @@ def main():
 
     out_dir = os.path.join("benchmarks", "results")
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"analytics_{cl_name}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    path = os.path.join(out_dir, f"analytics_{cl_name}_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["query", "consistency", "run", "ms"])

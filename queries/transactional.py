@@ -13,6 +13,7 @@ Les positions de test (T2, T13, T14) utilisent des plaques fictives "BULK-xxxx" 
 Rechargez avec  python -m data.generate_and_load --truncate  avant les mesures finales.
 """
 import argparse
+import collections
 import csv
 import datetime as dt
 import os
@@ -23,6 +24,7 @@ import uuid
 from decimal import Decimal
 
 import pygeohash as pgh
+from cassandra import ReadTimeout, Unavailable, WriteTimeout
 from cassandra.concurrent import execute_concurrent_with_args
 from cassandra.query import UNSET_VALUE, BatchStatement, BatchType
 
@@ -231,7 +233,7 @@ class Transactional:
         self.s.execute(self.ins_pos_ttl, (plate, ts.date(), ts, 33.5, -7.6, 50.0, 90, 60.0, "ON", seconds))
         ttl_now = self.s.execute(self.sel_ttl, (plate, ts.date())).one().ttl
         before = self.s.execute(self.cnt_pos_day, (plate, ts.date())).one()[0]
-        time.sleep(seconds + 1)
+        time.sleep(seconds + 3)
         after = self.s.execute(self.cnt_pos_day, (plate, ts.date())).one()[0]
         return dict(default_ttl_s=default_ttl, default_ttl_days=round(default_ttl / 86400, 1) if default_ttl else None,
                     ttl_restant_s=ttl_now, lignes_avant=before, lignes_apres=after)
@@ -266,7 +268,8 @@ class Transactional:
 def sample_refs(s):
     refs = dict(
         plates=[r.plate for r in s.execute("SELECT plate FROM vehicles LIMIT 60")],
-        traces=[(r.plate, r.day) for r in s.execute("SELECT DISTINCT plate, day FROM positions_by_vehicle_day LIMIT 40")],
+        traces=[(r.plate, r.day) for r in s.execute("SELECT DISTINCT plate, day FROM positions_by_vehicle_day LIMIT 600")
+                if not r.plate.startswith(("BULK-", "CONS-"))][:40],  # ignore les plaques de test
         drivers=[r.driver_id for r in s.execute("SELECT driver_id FROM drivers LIMIT 60")],
         weeks=[(r.driver_id, as_date(r.week_start)) for r in
                s.execute("SELECT DISTINCT driver_id, week_start FROM missions_by_driver_week LIMIT 40")],
@@ -291,10 +294,18 @@ def main():
     results, n = [], args.repeat
     pick = lambda lst, i: lst[i % len(lst)]
 
-    def bench(label, fn):
-        for i in range(n):
-            with timed(label, results):
-                fn(i)
+    errors = collections.Counter()
+    TRANSIENT = (WriteTimeout, ReadTimeout, Unavailable, ValueError)
+
+    def bench(label, fn, reps=None):
+        for i in range(reps or n):
+            try:
+                with timed(label, results):
+                    fn(i)
+            except TRANSIENT as e:   # un timeout isolé ne doit pas interrompre toute la série
+                results.pop()        # retire la mesure de l'exécution échouée
+                errors[label] += 1
+                print(f"  ! {label} exécution {i + 1} : {type(e).__name__}")
 
     t_place = lambda: Place("Dépôt test", "", 33.5731, -7.5898, pgh.encode(33.5731, -7.5898, precision=7))
 
@@ -302,10 +313,9 @@ def main():
     bench("T1", lambda i: q.t1_record_position(pick(refs["plates"], i), utcnow(), 33.5 + i * 1e-3,
                                                -7.6 - i * 1e-3, 60.0, 90, 70.0, "ON"))
     # T2 : lot de 10 000 positions (1 seule mesure par répétition, plus longue)
-    base = None
-    for _ in range(max(1, min(n, 5))):
-        with timed("T2", results):
-            base = q.t2_bulk_positions(10000, base=base)
+    base = utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - dt.timedelta(days=3)
+    bench("T2", lambda i: q.t2_bulk_positions(10000, base=base), reps=max(1, min(n, 5)))
+    time.sleep(3)  # laisse les nœuds absorber le lot de T2 avant la suite
     bench("T3", lambda i: q.t3_vehicle_card(pick(refs["plates"], i)))
     bench("T4", lambda i: q.t4_last_position(pick(refs["plates"], i)))
     bench("T5", lambda i: q.t5_day_trace(*pick(refs["traces"], i)))
@@ -315,10 +325,10 @@ def main():
     bench("T6", lambda i: mids.append(q.t6_create_mission(
         pick(refs["plates"], i), refs["veh_depot"][pick(refs["plates"], i)], t_place(), t_place(),
         now + dt.timedelta(hours=1), now + dt.timedelta(hours=3), 120.0)))
-    bench("T8", lambda i: q.t8_assign_driver(mids[i], pick(refs["drivers"], i)))
-    bench("T7_start", lambda i: q.t7_start_mission(mids[i]))
+    bench("T8", lambda i: q.t8_assign_driver(mids[i % len(mids)], pick(refs["drivers"], i)))
+    bench("T7_start", lambda i: q.t7_start_mission(mids[i % len(mids)]))
     bench("T15", lambda i: q.t15_active_missions(pick(refs["depots"], i)))
-    bench("T7_end", lambda i: q.t7_end_mission(mids[i], utcnow() + dt.timedelta(minutes=45)))
+    bench("T7_end", lambda i: q.t7_end_mission(mids[i % len(mids)], utcnow() + dt.timedelta(minutes=45)))
 
     bench("T9", lambda i: q.t9_record_event(pick(refs["drivers"], i), pick(refs["plates"], i),
                                             "SPEEDING", utcnow(), 118.0, 33.6, -7.5))
@@ -347,19 +357,24 @@ def main():
     print(f"{'requête':<10}{'médiane ms':>12}{'min ms':>10}{'max ms':>10}")
     for label, v in by.items():
         print(f"{label:<10}{statistics.median(v):>12.2f}{min(v):>10.2f}{max(v):>10.2f}")
+    if errors:
+        print(f"\nExécutions en erreur (timeouts) : {dict(errors)}")
     print(f"\nT14 : positions de BULK-0001 avant = {before}, après = {after}")
     print(f"T13 : {ttl}")
 
     out_dir = os.path.join("benchmarks", "results")
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"transactional_{cl_name}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    path = os.path.join(out_dir, f"transactional_{cl_name}_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["query", "consistency", "run", "ms"])
+        w.writerow(["query", "consistency", "run", "ms", "status"])
         counters = {}
         for r in results:
             counters[r["label"]] = counters.get(r["label"], 0) + 1
-            w.writerow([r["label"], cl_name, counters[r["label"]], f"{r['ms']:.3f}"])
+            w.writerow([r["label"], cl_name, counters[r["label"]], f"{r['ms']:.3f}", "ok"])
+        for label, c in errors.items():
+            for _ in range(c):
+                w.writerow([label, cl_name, "", "", "error"])
     print(f"Mesures enregistrées dans {path}")
     cluster.shutdown()
 

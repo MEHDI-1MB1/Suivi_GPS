@@ -224,7 +224,7 @@ def main():
     wait_until(lambda: hosts_up(cluster) == 3, 180, "3 nœuds actifs")
 
     os.makedirs(os.path.join("benchmarks", "results"), exist_ok=True)
-    path = os.path.join("benchmarks", "results", f"consistency_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    path = os.path.join("benchmarks", "results", f"consistency_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
