@@ -1,0 +1,16 @@
+phase,cl,op,n,ok,failed,errors,median_ms,p95_ms
+1 - 3 nœuds actifs,ONE,écriture,200,200,0,,1.54,2.33
+1 - 3 nœuds actifs,ONE,lecture,200,200,0,,2.88,4.0
+1 - 3 nœuds actifs,QUORUM,écriture,200,200,0,,2.1,2.83
+1 - 3 nœuds actifs,QUORUM,lecture,200,200,0,,2.33,3.4
+1 - 3 nœuds actifs,ALL,écriture,200,200,0,,1.58,2.21
+1 - 3 nœuds actifs,ALL,lecture,200,200,0,,2.41,3.21
+2 - cassandra3 arrêté,ONE,écriture,50,50,0,,0.81,1.11
+2 - cassandra3 arrêté,ONE,lecture,50,50,0,,0.87,1.17
+2 - cassandra3 arrêté,QUORUM,écriture,50,50,0,,1.2,1.52
+2 - cassandra3 arrêté,QUORUM,lecture,50,50,0,,1.49,1.99
+2 - cassandra3 arrêté,ALL,écriture,50,0,50,Unavailablex50,,
+2 - cassandra3 arrêté,ALL,lecture,50,0,50,Unavailablex50,,
+3 - lecture périmée,ONE,lecture,200,200,0,lignes manquantes,,
+3 - lecture périmée,QUORUM,lecture,200,200,0,lignes manquantes,,
+3 - lecture périmée,ONE (après QUORUM),lecture,200,200,0,lignes manquantes,,

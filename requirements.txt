@@ -1,0 +1,9 @@
+cassandra-driver
+pandas
+numpy
+faker
+pygeohash
+streamlit
+plotly
+tqdm
+python-dotenv

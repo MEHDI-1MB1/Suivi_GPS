@@ -1,0 +1,131 @@
+# Télématique de flotte - Cassandra 4.1 + Spark 3.5
+#
+# Profil dev  : 1 noeud Cassandra (développement quotidien)
+#   docker compose --profile dev up -d
+#
+# Profil full : 3 noeuds Cassandra (RF=3) + Spark (1 master, 2 workers)
+#   docker compose --profile full up -d
+#
+# Arrêt : docker compose --profile full down      (garde les données)
+#         docker compose --profile full down -v   (efface les données)
+
+x-cassandra-common: &cassandra-common
+  image: cassandra:4.1
+  restart: unless-stopped
+  networks: [fleet-net]
+  environment: &cassandra-env
+    CASSANDRA_CLUSTER_NAME: fleet-cluster
+    CASSANDRA_DC: dc1
+    CASSANDRA_RACK: rack1
+    CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+    CASSANDRA_SEEDS: cassandra1
+    # Heap réduit pour tenir dans 7,6 Go avec 3 noeuds + Spark
+    MAX_HEAP_SIZE: 700M
+    HEAP_NEWSIZE: 200M
+  healthcheck:
+    test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+    interval: 20s
+    timeout: 15s
+    retries: 15
+    start_period: 60s
+
+x-spark-common: &spark-common
+  image: apache/spark:3.5.3-python3
+  restart: unless-stopped
+  networks: [fleet-net]
+
+services:
+  # ---------------- Cassandra ----------------
+  cassandra1:
+    <<: *cassandra-common
+    container_name: cassandra1
+    profiles: ["dev", "full"]
+    hostname: cassandra1
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra1-data:/var/lib/cassandra
+
+  cassandra2:
+    <<: *cassandra-common
+    container_name: cassandra2
+    profiles: ["full"]
+    hostname: cassandra2
+    ports:
+      - "9043:9042"
+    volumes:
+      - cassandra2-data:/var/lib/cassandra
+    depends_on:
+      cassandra1:
+        condition: service_healthy
+
+  cassandra3:
+    <<: *cassandra-common
+    container_name: cassandra3
+    profiles: ["full"]
+    hostname: cassandra3
+    ports:
+      - "9044:9042"
+    volumes:
+      - cassandra3-data:/var/lib/cassandra
+    depends_on:
+      cassandra2:
+        condition: service_healthy
+
+  # ---------------- Spark ----------------
+  spark-master:
+    <<: *spark-common
+    container_name: spark-master
+    profiles: ["full"]
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+
+  spark-worker1:
+    <<: *spark-common
+    container_name: spark-worker1
+    profiles: ["full"]
+    hostname: spark-worker1
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    depends_on: [spark-master]
+
+  spark-worker2:
+    <<: *spark-common
+    container_name: spark-worker2
+    profiles: ["full"]
+    hostname: spark-worker2
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_WEBUI_PORT: "8082"
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    depends_on: [spark-master]
+
+networks:
+  fleet-net:
+    driver: bridge
+
+volumes:
+  cassandra1-data:
+  cassandra2-data:
+  cassandra3-data:
