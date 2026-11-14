@@ -221,6 +221,10 @@ with tab_anom:
 
 # ------------------------------------------------------------------ performances
 with tab_perf:
+    RES = ROOT / "benchmarks" / "results"
+    LABELS = {"query": "Requête", "ms": "Médiane (ms)", "median_ms": "Médiane (ms)", "source": "Famille",
+              "mode": "Mode", "niveau": "Niveau de cohérence", "variante": "Méthode"}
+
     st.subheader("Natif (Cassandra) contre Spark")
     if not COMPARISON.exists():
         st.info("Lancez `python benchmarks/compare.py` pour produire comparison.csv.")
@@ -232,9 +236,60 @@ with tab_perf:
                              var_name="mode", value_name="ms")
             long["mode"] = long["mode"].map({"native_median_ms": "Natif", "spark_median_ms": "Spark"})
             st.plotly_chart(px.bar(long, x="query", y="ms", color="mode", barmode="group", log_y=True,
-                                   title="Médiane par requête (échelle logarithmique)",
-                                   labels={"query": "Requête", "ms": "Médiane (ms)", "mode": "Mode"}),
+                                   title="Médiane par requête (échelle logarithmique)", labels=LABELS),
                             use_container_width=True)
         st.dataframe(cmp_, hide_index=True, use_container_width=True)
-        st.caption("Chauffe puis 10 exécutions par requête, même machine et même base. "
-                   "Le natif lit des compteurs pré-agrégés à l'écriture ; Spark recalcule à partir des données brutes.")
+        st.caption("Chauffe puis 10 exécutions par requête, même machine et même base. Le natif lit des "
+                   "compteurs pré-agrégés à l'écriture ; Spark recalcule à partir des données brutes.")
+
+    st.subheader("Les 30 requêtes")
+    all_q = RES / "all_queries.csv"
+    if all_q.exists():
+        aq = pd.read_csv(all_q)
+        meas = aq.dropna(subset=["median_ms"])
+        st.plotly_chart(px.bar(meas, x="query", y="median_ms", color="source", log_y=True,
+                               title="Médiane de chaque requête (échelle logarithmique)", labels=LABELS),
+                        use_container_width=True)
+        st.dataframe(aq, hide_index=True, use_container_width=True)
+        st.caption("T13 (expiration à 60 jours) est une propriété du schéma (TTL), vérifiée avec une ligne à TTL court "
+                   "et non chronométrée. T7 est mesurée en deux temps (T7_start, T7_end).")
+    else:
+        st.info("Lancez `python benchmarks/compare.py` pour produire all_queries.csv.")
+
+    st.subheader("Effet de la cohérence (ONE, QUORUM, ALL)")
+    cons_file = RES / "consistency.csv"
+    if cons_file.exists():
+        cons = pd.read_csv(cons_file)
+        wanted = [q for q in ["A17", "A21", "A24", "T1", "T4", "T7_end"] if q in set(cons["query"])]
+        pick = st.multiselect("Requêtes", list(cons["query"]), default=wanted)
+        cols = [c for c in cons.columns if c.endswith("_ms")]
+        if pick:
+            long = cons[cons["query"].isin(pick)].melt(id_vars="query", value_vars=cols,
+                                                       var_name="niveau", value_name="ms")
+            long["niveau"] = long["niveau"].str.replace("_ms", "", regex=False)
+            st.plotly_chart(px.bar(long, x="query", y="ms", color="niveau", barmode="group",
+                                   title="Médiane selon le niveau de cohérence", labels=LABELS),
+                            use_container_width=True)
+        st.caption("Les écarts sont nets sur les balayages de nombreuses partitions (A17, A21, A24) et faibles sur les "
+                   "opérations d'une seule partition : les trois nœuds sont sur la même machine, sans latence réseau.")
+    st.markdown("**Disponibilité avec des nœuds arrêtés** (RF = 3, test réalisé avec `cqlsh`)")
+    st.dataframe(pd.DataFrame(
+        {"Situation": ["3 nœuds actifs", "1 nœud arrêté", "2 nœuds arrêtés"],
+         "ONE": ["OK", "OK", "OK"],
+         "QUORUM": ["OK", "OK", "Indisponible (2 réplicas requis, 1 vivant)"],
+         "ALL": ["OK", "Indisponible (3 requis, 2 vivants)", "Indisponible (3 requis, 1 vivant)"]}),
+        hide_index=True, use_container_width=True)
+
+    st.subheader("Effet de l'indexation (véhicules d'un dépôt)")
+    idx_files = sorted(RES.glob("index_*.csv"))
+    if idx_files:
+        idx = pd.read_csv(idx_files[-1])
+        agg = idx.groupby("query")["ms"].agg(median="median", p95=lambda v: v.quantile(0.95)).reset_index()
+        names = {"IDX_scan": "Sans index (balayage)", "IDX_index": "Index secondaire", "IDX_table": "Table dédiée"}
+        agg["variante"] = agg["query"].map(names)
+        st.plotly_chart(px.bar(agg, x="variante", y="median", title="Médiane (ms), même question, trois méthodes",
+                               labels={"median": "Médiane (ms)", "variante": "Méthode"}), use_container_width=True)
+        st.caption("Le dépôt DEP01 contient 405 véhicules sur 1 500 : un index secondaire sur une colonne à faible "
+                   "cardinalité interroge tous les nœuds et gagne peu ; la table dédiée lit une seule partition.")
+    else:
+        st.info("Lancez `python benchmarks/index_effect.py --with-drop` pour produire la mesure.")
