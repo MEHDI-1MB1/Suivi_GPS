@@ -7,3 +7,6 @@ streamlit
 plotly
 tqdm
 python-dotenv
+pyspark==3.5.3
+pydeck
+pytest

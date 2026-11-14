@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .env
+data/csv/*
+*.log
+*:Zone.Identifier
+docker-compose.override.yml
+spark-jobs/out/
