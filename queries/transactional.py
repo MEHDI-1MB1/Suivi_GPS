@@ -24,13 +24,13 @@ import uuid
 from decimal import Decimal
 
 import pygeohash as pgh
-from cassandra import ReadTimeout, Unavailable, WriteTimeout
+from cassandra import ReadFailure, ReadTimeout, Unavailable, WriteFailure, WriteTimeout
 from cassandra.concurrent import execute_concurrent_with_args
 from cassandra.query import UNSET_VALUE, BatchStatement, BatchType
 
 from common.db import connect, timed
 from data.generate_and_load import GeoPoint, PartItem, Place, monday
-
+TRANSIENT = (WriteTimeout, ReadTimeout, Unavailable, WriteFailure, ReadFailure, ValueError)
 
 def utcnow():
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
@@ -224,6 +224,15 @@ class Transactional:
         self.s.execute(self.add_equip, ({item}, plate))
 
     # ------------------------------------------------------------------ T13
+    def t13_ttl_check(self, plate="BULK-TTL60"):
+        """Insère une position (TTL par défaut = 60 j) et relit son TTL restant."""
+        ts = utcnow()
+        self.s.execute(self.ins_pos, (plate, ts.date(), ts, 33.5, -7.6, 50.0, 90, 60.0, "ON"))
+        ttl = self.s.execute(self.sel_ttl, (plate, ts.date())).one().ttl
+        if not (5_100_000 < ttl <= 5_184_000):
+            raise ValueError(f"TTL inattendu : {ttl}")
+        return ttl
+    
     def t13_ttl_demo(self, sample_plate, sample_day, seconds=5):
         """Montre (1) le TTL par défaut de 60 jours sur une ligne chargée, (2) l'expiration
         automatique d'une ligne écrite avec un TTL de quelques secondes."""
@@ -295,7 +304,6 @@ def main():
     pick = lambda lst, i: lst[i % len(lst)]
 
     errors = collections.Counter()
-    TRANSIENT = (WriteTimeout, ReadTimeout, Unavailable, ValueError)
 
     def bench(label, fn, reps=None):
         for i in range(reps or n):
@@ -329,6 +337,24 @@ def main():
     bench("T7_start", lambda i: q.t7_start_mission(mids[i % len(mids)]))
     bench("T15", lambda i: q.t15_active_missions(pick(refs["depots"], i)))
     bench("T7_end", lambda i: q.t7_end_mission(mids[i % len(mids)], utcnow() + dt.timedelta(minutes=45)))
+    
+    # T7 complet : démarrer puis terminer une mission (création hors chronomètre)
+    mids7 = []
+    for i in range(n):
+        try:
+            mids7.append(q.t6_create_mission(
+                pick(refs["plates"], i), refs["veh_depot"][pick(refs["plates"], i)],
+                t_place(), t_place(), now + dt.timedelta(hours=1),
+                now + dt.timedelta(hours=3), 120.0, pick(refs["drivers"], i)))
+        except TRANSIENT:
+            errors["T7_setup"] += 1
+
+    def t7(i):
+        q.t7_start_mission(mids7[i])
+        q.t7_end_mission(mids7[i], utcnow() + dt.timedelta(minutes=45))
+
+    if mids7:
+        bench("T7", t7, reps=len(mids7))
 
     bench("T9", lambda i: q.t9_record_event(pick(refs["drivers"], i), pick(refs["plates"], i),
                                             "SPEEDING", utcnow(), 118.0, 33.6, -7.5))
@@ -345,6 +371,9 @@ def main():
     before = q.count_positions("BULK-0001", start, end)
     bench("T14", lambda i: q.t14_delete_range("BULK-0001", start, end))
     after = q.count_positions("BULK-0001", start, end)
+
+    bench("T13", lambda i: q.t13_ttl_check())
+    s.execute("DELETE FROM positions_by_vehicle_day WHERE plate='BULK-TTL60' AND day=%s", (utcnow().date(),))
 
     # T13 : démonstration (contient une pause, donc non chronométrée)
     ttl = q.t13_ttl_demo(*refs["traces"][0])

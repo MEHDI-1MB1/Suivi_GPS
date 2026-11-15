@@ -289,7 +289,7 @@ with tab_perf:
         agg["variante"] = agg["query"].map(names)
         st.plotly_chart(px.bar(agg, x="variante", y="median", title="Médiane (ms), même question, trois méthodes",
                                labels={"median": "Médiane (ms)", "variante": "Méthode"}), use_container_width=True)
-        st.caption("Le dépôt DEP01 contient 405 véhicules sur 1 500 : un index secondaire sur une colonne à faible "
+        st.caption("Le dépôt DEP01 contient N véhicules sur 1 500 : un index secondaire sur une colonne à faible "
                    "cardinalité interroge tous les nœuds et gagne peu ; la table dédiée lit une seule partition.")
     else:
         st.info("Lancez `python benchmarks/index_effect.py --with-drop` pour produire la mesure.")
