@@ -27,8 +27,14 @@ from decimal import Decimal
 
 import numpy as np
 import pygeohash as pgh
-from faker import Faker
 from tqdm import tqdm
+
+try:  # lancé avec : python -m data.generate_and_load
+    from .land_mask import lerp_land, path_km, random_land_point, to_land  # masque terre/mer
+    from . import moroccan_data as ma                                      # noms, adresses, plaques...
+except ImportError:  # lancé directement : python data/generate_and_load.py
+    from land_mask import lerp_land, path_km, random_land_point, to_land
+    import moroccan_data as ma
 
 # --- Types UDT (l'ordre des champs doit suivre schema.cql) -------------------
 GeoPoint = namedtuple("GeoPoint", "lat lon")
@@ -99,6 +105,7 @@ def bearing(lat1, lon1, lat2, lon2):
 
 
 def make_place(name, address, lat, lon):
+    lat, lon = to_land(lat, lon)
     return Place(name, address, round(lat, 5), round(lon, 5), pgh.encode(lat, lon, precision=7))
 
 
@@ -106,10 +113,12 @@ def make_place(name, address, lat, lon):
 def gen_vehicles(n, rng):
     types = list(VEHICLE_CATALOG)
     depot_ids, dweights = [d[0] for d in DEPOTS], [d[5] for d in DEPOTS]
+    city_of = {d[0]: d[2] for d in DEPOTS}
     plates, out = set(), []
     for _ in range(n):
+        dep = rng.choices(depot_ids, dweights)[0]
         while True:
-            plate = f"{rng.randint(1, 99999):05d}-{rng.choice('ABDEHJTW')}-{rng.randint(1, 89)}"
+            plate = ma.plate(rng, city_of[dep])
             if plate not in plates:
                 plates.add(plate)
                 break
@@ -118,7 +127,7 @@ def gen_vehicles(n, rng):
         out.append(dict(
             plate=plate, vehicle_type=vtype, brand=brand, model=model,
             year=rng.randint(2012, 2025), capacity_kg=cap,
-            depot_id=rng.choices(depot_ids, dweights)[0],
+            depot_id=dep,
             equipment={"GPS"} | set(rng.sample(EQUIP_OPT, rng.randint(1, 4))),
             features={"carburant": "diesel", "boite": rng.choice(["manuelle", "automatique"]),
                       "norme": rng.choice(["Euro 5", "Euro 6"]),
@@ -130,14 +139,23 @@ def gen_vehicles(n, rng):
 
 def gen_drivers(n, rng, nrng, fake):
     depot_ids, dweights = [d[0] for d in DEPOTS], [d[5] for d in DEPOTS]
-    licenses = [["B"], ["B", "C"], ["B", "C", "CE"], ["B", "D"], ["B", "C", "CE", "D"]]
+    licenses = ma.LICENSES   # permis marocains (EC et non CE)
     lw = [0.15, 0.30, 0.30, 0.10, 0.15]
     # Propension individuelle aux excès de vitesse / freinages brusques (moyenne 1)
     ps = nrng.lognormal(0, 0.7, n)
     pb = nrng.lognormal(0, 0.5, n)
     ps, pb = ps / ps.mean(), pb / pb.mean()
     start, span = dt.date(2008, 1, 1), (dt.date(2026, 6, 30) - dt.date(2008, 1, 1)).days
-    return [dict(driver_id=f"DRV{i + 1:05d}", name=fake.name(),
+    cins = set()
+
+    def new_cin():
+        while True:
+            c = ma.cin(rng)
+            if c not in cins:
+                cins.add(c)
+                return c
+
+    return [dict(driver_id=f"DRV{i + 1:05d}", name=ma.person_name(rng), cin=new_cin(), phone=ma.phone(rng),
                  license_categories=rng.choices(licenses, lw)[0],
                  hire_date=start + dt.timedelta(days=rng.randint(0, span)),
                  depot_id=rng.choices(depot_ids, dweights)[0],
@@ -147,18 +165,18 @@ def gen_drivers(n, rng, nrng, fake):
 # --- Missions ----------------------------------------------------------------
 def pick_destination(o_lat, o_lon, home_city, rng, fake):
     if rng.random() < 0.35:  # livraison locale
-        lat, lon = o_lat + rng.uniform(-0.15, 0.15), o_lon + rng.uniform(-0.15, 0.15)
+        lat, lon = random_land_point(rng, o_lat, o_lon, 15)
         city = home_city
     else:
         cands = [c for c in CITIES if c[0] != home_city
                  and 40 <= haversine(o_lat, o_lon, c[1], c[2]) <= 450]
         if cands:
             city, clat, clon = rng.choice(cands)
-            lat, lon = clat + rng.uniform(-0.05, 0.05), clon + rng.uniform(-0.05, 0.05)
+            lat, lon = random_land_point(rng, clat, clon, 5)
         else:  # aucune ville dans la plage : livraison locale
             city = home_city
-            lat, lon = o_lat + rng.uniform(-0.15, 0.15), o_lon + rng.uniform(-0.15, 0.15)
-    return make_place(f"Client {fake.company()} ({city})", fake.street_address(), lat, lon)
+            lat, lon = random_land_point(rng, o_lat, o_lon, 15)
+    return make_place(f"{ma.company(rng)} ({city})", ma.address(rng, city), lat, lon)
 
 
 def gen_missions(n, n_live, vehicles, drivers, now, rng, nrng, fake, depot_places, depot_city, speed_factor):
@@ -178,7 +196,7 @@ def gen_missions(n, n_live, vehicles, drivers, now, rng, nrng, fake, depot_place
         dep = v["depot_id"]
         o = depot_places[dep]
         dest = pick_destination(o.lat, o.lon, depot_city[dep], rng, fake)
-        dist = max(3.0, haversine(o.lat, o.lon, dest.lat, dest.lon))
+        dist = max(3.0, path_km(o.lat, o.lon, dest.lat, dest.lon))
         if live:
             p_start = now - dt.timedelta(minutes=rng.randint(20, 120))
         else:
@@ -221,7 +239,7 @@ def simulate_trace(m, rng, nrng, truth):
     """Trajectoire d'une mission DONE : un point toutes les 30 s (±2 s) sur la droite
     origine-destination. Met à jour m['actual_end'] avec la fin réelle de la trace."""
     o, d, plate = m["origin"], m["destination"], m["plate"]
-    total = max(haversine(o.lat, o.lon, d.lat, d.lon), 1.0)
+    total = max(path_km(o.lat, o.lon, d.lat, d.lon), 1.0)
     brg = bearing(o.lat, o.lon, d.lat, d.lon)
     v_avg = clip(nrng.normal(55, 8), 35, 80)
     t, fuel = m["actual_start"], rng.uniform(55, 100)
@@ -252,8 +270,13 @@ def simulate_trace(m, rng, nrng, truth):
         if done_km >= total:
             add(d.lat, d.lon, 0.0, "IDLE")
             break
-        lat = o.lat + (d.lat - o.lat) * f + nrng.normal(0, 0.0002)
-        lon = o.lon + (d.lon - o.lon) * f + nrng.normal(0, 0.0002)
+        lat, lon = lerp_land(o.lat, o.lon, d.lat, d.lon, f)
+        nlat, nlon = lerp_land(o.lat, o.lon, d.lat, d.lon, min(1.0, f + 0.01))
+        if (nlat, nlon) != (lat, lon):
+            brg = bearing(lat, lon, nlat, nlon)
+        lat += nrng.normal(0, 0.0002)
+        lon += nrng.normal(0, 0.0002)
+        lat, lon = to_land(lat, lon, 0.02)
         add(lat, lon, s, "ON")
         if stop_km is not None and not stopped and done_km >= stop_km:
             stopped = True
@@ -279,7 +302,8 @@ def simulate_trace(m, rng, nrng, truth):
     for i in range(3, len(pts) - 3):
         if rng.random() < JUMP_PROB:
             p = list(pts[i])
-            p[2] = round(p[2] + rng.choice([-1, 1]) * rng.uniform(0.05, 0.12), 6)
+            p[2], p[3] = to_land(p[2] + rng.choice([-1, 1]) * rng.uniform(0.05, 0.12), p[3])
+            p[2], p[3] = round(p[2], 6), round(p[3], 6)
             pts[i] = tuple(p)
             truth["gps_jumps"].append(dict(plate=plate, ts=p[1].isoformat()))
     m["actual_end"] = pts[-1][1]
@@ -307,8 +331,7 @@ def gen_events(missions, drivers, target, rng, nrng):
         events.append(dict(driver_id=m["driver_id"], day=ts.date(), ts=ts,
                            event_id=uuid.UUID(int=rng.getrandbits(128), version=4),
                            plate=m["plate"], event_type=typ, value=value,
-                           position=GeoPoint(round(o.lat + (d.lat - o.lat) * frac, 6),
-                                             round(o.lon + (d.lon - o.lon) * frac, 6))))
+                           position=GeoPoint(*(round(x, 6) for x in lerp_land(o.lat, o.lon, d.lat, d.lon, frac)))))
 
     for m in done:
         s, b = prop[m["driver_id"]]
@@ -354,11 +377,11 @@ def gen_last_positions(vehicles, missions, depot_places, now, rng):
             span = max((m["planned_end"] - m["actual_start"]).total_seconds(), 1)
             frac = clip((now - m["actual_start"]).total_seconds() / span, 0.02, 0.98)
             o, d = m["origin"], m["destination"]
-            lat, lon = o.lat + (d.lat - o.lat) * frac, o.lon + (d.lon - o.lon) * frac
+            lat, lon = lerp_land(o.lat, o.lon, d.lat, d.lon, frac)
             ts, speed, eng = now - dt.timedelta(seconds=rng.randint(0, 90)), rng.uniform(40, 85), "ON"
         else:
             o = depot_places[v["depot_id"]]
-            lat, lon = o.lat + rng.uniform(-0.2, 0.2), o.lon + rng.uniform(-0.2, 0.2)
+            lat, lon = random_land_point(rng, o.lat, o.lon, 12)
             if rng.random() < 0.88:   # récent
                 ts = now - dt.timedelta(minutes=rng.uniform(0, 50))
             else:                     # silencieux depuis plus d'1 h (cible de A21)
@@ -375,13 +398,12 @@ def generate(args):
     now = dt.datetime.fromisoformat(args.now) if args.now else \
         dt.datetime.now(dt.timezone.utc).replace(tzinfo=None, microsecond=0)
     rng, nrng = random.Random(args.seed), np.random.default_rng(args.seed)
-    Faker.seed(args.seed)
-    fake = Faker("fr_FR")
+    fake = None   # Faker n'est plus utilisé : tout vient de moroccan_data
     s = args.scale
     n_veh, n_drv = max(10, int(1500 * s)), max(10, int(2000 * s))
     n_mis, n_pos, n_evt = int(12000 * s), int(120000 * s), int(16000 * s)
 
-    depot_places = {d[0]: make_place(d[1], d[2], d[3], d[4]) for d in DEPOTS}
+    depot_places = {d[0]: make_place(d[1], ma.address(rng, d[2]), d[3], d[4]) for d in DEPOTS}
     depot_city = {d[0]: d[2] for d in DEPOTS}
     speed_factor = {d[0]: rng.uniform(0.88, 1.08) for d in DEPOTS}  # certains dépôts plus lents
 
@@ -510,8 +532,8 @@ def load(args, d):
         bulk("INSERT INTO vehicles_by_depot (depot_id,plate,vehicle_type,model) VALUES (?,?,?,?)",
              [(v["depot_id"], v["plate"], v["vehicle_type"], v["model"]) for v in d["vehicles"]],
              "vehicles_by_depot")
-        bulk("INSERT INTO drivers (driver_id,name,license_categories,hire_date,depot_id) VALUES (?,?,?,?,?)",
-             [(x["driver_id"], x["name"], x["license_categories"], x["hire_date"], x["depot_id"])
+        bulk("INSERT INTO drivers (driver_id,name,cin,phone,license_categories,hire_date,depot_id) VALUES (?,?,?,?,?,?,?)",
+             [(x["driver_id"], x["name"], x["cin"], x["phone"], x["license_categories"], x["hire_date"], x["depot_id"])
               for x in d["drivers"]], "drivers")
         bulk("INSERT INTO positions_by_vehicle_day (plate,day,ts,lat,lon,speed_kmh,heading,fuel_pct,"
              "engine_state) VALUES (?,?,?,?,?,?,?,?,?)",

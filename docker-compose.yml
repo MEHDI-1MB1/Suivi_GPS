@@ -116,7 +116,7 @@ services:
       SPARK_WORKER_MEMORY: 1g
       SPARK_WORKER_WEBUI_PORT: "8082"
     ports:
-      - "8082:8082"
+      - "8092:8081"
     volumes:
       - ./spark-jobs:/opt/spark-jobs
     depends_on: [spark-master]

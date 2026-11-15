@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS vehicles_by_depot (
 CREATE TABLE IF NOT EXISTS drivers (
   driver_id           text PRIMARY KEY,
   name                text,
+  cin                 text,
+  phone               text,
   license_categories  list<text>,
   hire_date           date,
   depot_id            text

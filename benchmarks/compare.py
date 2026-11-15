@@ -112,14 +112,14 @@ all_rows.append({"query": "T13", "source": "Cassandra (T)", "runs": 0, "errors":
                  "median_ms": "", "p95_ms": ""})        # TTL de 60 jours : propriété du schéma, non chronométrée
 all_rows.sort(key=lambda r: order(r["query"]))
 write("all_queries.csv", all_rows)
-measured = [r for r in all_rows if r["runs"]]
+measured = [r for r in all_rows if r["runs"] and r["query"] not in ("T7_start", "T7_end")]
 print(f"\n=== Les 30 requêtes : {len(measured)} mesurées ===")
 missing = [f"T{i}" for i in range(1, 16)
            if not any((r["query"] == f"T{i}" or r["query"].startswith(f"T{i}_")) and r["runs"] for r in all_rows)]
 missing += [f"A{i}" for i in range(16, 26) if not any(r["query"] == f"A{i}" and r["runs"] for r in all_rows)]
 missing += [f"S{i}" for i in range(26, 31) if not any(r["query"] == f"S{i}" and r["runs"] for r in all_rows)]
 print("sans mesure :", ", ".join(missing) or "aucune",
-      "(T13 = TTL, non chronométrée ; T7 est mesurée en deux temps : T7_start, T7_end)")
+      "(T7 est mesurée en un bloc `T7`, avec le détail T7_start / T7_end)")
 errs = [f"{r['query']}:{r['errors']}" for r in all_rows if r["errors"]]
 if errs:
     print("exécutions en erreur :", ", ".join(errs))
